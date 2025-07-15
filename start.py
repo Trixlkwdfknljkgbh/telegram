@@ -58,20 +58,27 @@ def contains_keyword(text: str) -> bool:
 
 def translate_uk_to_ru(text: str) -> str:
     try:
-        pairs = re.findall(r'\b[A-Z]{3}\s?[\/]?\s?[A-Z]{3}\b', text)
-        placeholders = {pair: f"__PAIR_{i}__" for i, pair in enumerate(pairs)}
-        for original, placeholder in placeholders.items():
-            text = text.replace(original, placeholder)
+        # Розбиваємо текст на шматки — валютні пари і решта
+        tokens = re.split(r'(\b[A-Z]{3}\s?[\/]?\s?[A-Z]{3}\b)', text)
 
-        translated = translator.translate_text(text, source_lang='UK', target_lang='RU').text
+        translated_tokens = []
+        for token in tokens:
+            if re.fullmatch(r'\b[A-Z]{3}\s?[\/]?\s?[A-Z]{3}\b', token):
+                # Це валютна пара — не перекладаємо
+                translated_tokens.append(token)
+            else:
+                # Звичайний текст — перекладаємо
+                if token.strip():
+                    translated = translator.translate_text(token, source_lang='UK', target_lang='RU').text
+                    translated_tokens.append(translated)
+                else:
+                    translated_tokens.append(token)
 
-        for original, placeholder in placeholders.items():
-            translated = translated.replace(placeholder, original)
-
-        return translated
+        return ''.join(translated_tokens)
     except Exception as e:
         print("🛑 Translate error:", e)
         return text
+
 
 def clean(text: str) -> str:
     for p in BLOCK_PHRASES:
@@ -151,41 +158,69 @@ async def main():
     global SOURCE_CHANNEL
 
     await client.start()
-    TARGET_CHANNEL = await resolve_private('https://t.me/+p00htZoILT02YTIy')
+    TARGET_CHANNEL = await resolve_private('https://t.me/+8ABxxE4kkQtlNDEy')
     print("🔗 TARGET resolved:", TARGET_CHANNEL.channel_id)
-    SOURCE_CHANNEL = await resolve_private('https://t.me/+yJSy9XvuqSZmMzYy')
+    SOURCE_CHANNEL = await resolve_private('https://t.me/+AKsRB-gDtaRiOGRi')
     print("🔗 SOURCE resolved:", SOURCE_CHANNEL.channel_id)
 
     @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
     async def forward_all(ev):
-        txt_uk = ev.message.message or ""
+        msg = ev.message
+    
+        # 🔧 Пропускаємо голосові та кружки (round video)
+        if getattr(msg, 'voice', None) or getattr(msg, 'video_note', None):
+            return
+    
+        txt_uk = msg.message or ""
         txt_ru = translate_uk_to_ru(txt_uk)
         cleaned = reformat_signal(clean(txt_ru))
+    
+        # 🔁 Обробка відповіді
+        reply_to = None
+        if msg.is_reply:
+            try:
+                reply = await msg.get_reply_message()
+                if reply:
+                    reply_to = msg_map.get(str(reply.id))
+            except Exception as e:
+                print("🛑 Не вдалося обробити reply:", e)
 
-        if ev.message.media:
+        # 📤 Відправка
+        if msg.media:
             sent = await client.send_file(
                 TARGET_CHANNEL,
-                file=ev.message.media,
-                caption=cleaned or None
+                file=msg.media,
+                caption=cleaned or None,
+                reply_to=reply_to
             )
         else:
-            sent = await client.send_message(TARGET_CHANNEL, cleaned)
-
-        msg_map[str(ev.message.id)] = sent.id
+            sent = await client.send_message(
+                TARGET_CHANNEL,
+                cleaned,
+                reply_to=reply_to
+            )
+    
+        msg_map[str(msg.id)] = sent.id
         save_map()
 
     @client.on(events.MessageEdited(chats=SOURCE_CHANNEL))
     async def sync_edit(ev):
-        sid = str(ev.message.id)
+        msg = ev.message
+    
+        # 🔧 Пропускаємо голосові та кружечки
+        if getattr(msg, 'voice', None) or getattr(msg, 'video_note', None):
+            return
+    
+        sid = str(msg.id)
         if sid not in msg_map:
             return
-
-        txt_uk = ev.message.message or ""
+    
+        txt_uk = msg.message or ""
         txt_ru = translate_uk_to_ru(txt_uk)
         cleaned = reformat_signal(clean(txt_ru))
         if not cleaned:
             return
-
+    
         try:
             await client.edit_message(TARGET_CHANNEL, msg_map[sid], cleaned)
         except MessageNotModifiedError:
